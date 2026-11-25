@@ -333,6 +333,68 @@ class MechanicalAudioEngine {
     return { source, gain };
   }
 
+  public playMilestoneTick(
+    streak: number,
+    profile: SwitchProfile,
+    volume: number
+  ): void {
+    if (this.masterMuted || profile === 'muted' || volume <= 0.01) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    // Gentle ascending pentatonic interval as streak climbs
+    const tier = Math.min(4, Math.floor(streak / 25));
+    const freqs = [523.25, 587.33, 659.25, 783.99, 880.0];
+    const freq = freqs[tier] ?? 659.25;
+    const gainLevel = Math.min(1, Math.max(0, volume)) * 0.14;
+
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, now);
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.linearRampToValueAtTime(gainLevel, now + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0008, now + 0.24);
+    osc.connect(g);
+    g.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.26);
+  }
+
+  public playCompletionChime(
+    isPersonalBest: boolean,
+    profile: SwitchProfile,
+    volume: number
+  ): void {
+    if (this.masterMuted || profile === 'muted' || volume <= 0.01) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const baseGain = Math.min(1, Math.max(0, volume)) * 0.16;
+    // Warm C-major ninth arpeggio for PB; serene fifth for standard finish
+    const notes = isPersonalBest
+      ? [523.25, 659.25, 783.99, 1174.66]
+      : [523.25, 783.99];
+    const step = isPersonalBest ? 0.075 : 0.09;
+
+    notes.forEach((freq, i) => {
+      const start = now + i * step;
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, start);
+      g.gain.setValueAtTime(0.001, start);
+      g.gain.linearRampToValueAtTime(baseGain * (1 - i * 0.1), start + 0.018);
+      g.gain.exponentialRampToValueAtTime(0.0008, start + 0.45);
+      osc.connect(g);
+      g.connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + 0.48);
+    });
+  }
+
   public syncAmbientState(
     volumes: Record<AmbientTrack, number>,
     masterMuted: boolean

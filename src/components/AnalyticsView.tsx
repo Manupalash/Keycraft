@@ -1,15 +1,23 @@
 import { Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { getThemeById } from '../data/themes';
-import { KeyStat, SessionRecord, ThemeId } from '../types/typing';
+import {
+  DailyStreakData,
+  KeyStat,
+  SessionRecord,
+  ThemeId,
+} from '../types/typing';
+import { getTopWeakKeys } from '../utils/storage';
 import { KeyHeatData, TactileKeyboard } from './TactileKeyboard';
 
 interface AnalyticsViewProps {
   history: SessionRecord[];
   keyStats: Record<string, KeyStat>;
+  dailyStreak: DailyStreakData;
   themeId: ThemeId;
   onClearHistory: () => void;
   onGoToPractice: () => void;
+  onDrillKeys: (keys: string[]) => void;
 }
 
 type HeatmapMetric = 'errorRate' | 'latency';
@@ -17,15 +25,18 @@ type HeatmapMetric = 'errorRate' | 'latency';
 export function AnalyticsView({
   history,
   keyStats,
+  dailyStreak,
   themeId,
   onClearHistory,
   onGoToPractice,
+  onDrillKeys,
 }: AnalyticsViewProps) {
   const [heatmapMetric, setHeatmapMetric] = useState<HeatmapMetric>('errorRate');
   const [selectedKey, setSelectedKey] = useState<string>('e');
   const [confirmClear, setConfirmClear] = useState(false);
 
   const theme = getThemeById(themeId);
+  const topWeakKeys = useMemo(() => getTopWeakKeys(keyStats, 4), [keyStats]);
 
   const summary = useMemo(() => {
     if (history.length === 0) {
@@ -90,7 +101,12 @@ export function AnalyticsView({
   }, [keyStats, heatmapMetric, selectedKey, theme]);
 
   const selectedStat = keyStats[selectedKey];
-  const recentTrend = useMemo(() => [...history].slice(0, 20).reverse(), [history]);
+  const canDrillSelected =
+    selectedKey.length === 1 && /[a-z0-9]/i.test(selectedKey);
+  const recentTrend = useMemo(
+    () => [...history].slice(0, 20).reverse(),
+    [history]
+  );
 
   const formatDuration = (sec: number) => {
     const mins = Math.floor(sec / 60);
@@ -131,9 +147,27 @@ export function AnalyticsView({
   return (
     <div className="mx-auto max-w-5xl space-y-10 py-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <h1 className="text-2xl font-bold tracking-tight">Analytics</h1>
+        <div className="flex items-baseline gap-4">
+          <h1 className="text-2xl font-bold tracking-tight">Analytics</h1>
+          <span
+            className="font-mono-typing text-xs tabular-nums"
+            style={{ color: 'var(--ink-muted)' }}
+          >
+            {formatDuration(summary.totalSeconds)} typed
+          </span>
+        </div>
 
         <div className="flex items-center gap-3">
+          {topWeakKeys.length > 0 && (
+            <button
+              type="button"
+              onClick={() => onDrillKeys(topWeakKeys)}
+              className="keycap-accent cursor-pointer rounded-lg px-3.5 py-1.5 text-xs font-semibold whitespace-nowrap"
+            >
+              Practice Weak Keys ({topWeakKeys.map((k) => k.toUpperCase()).join(' ')})
+            </button>
+          )}
+
           {confirmClear ? (
             <div className="flex items-center gap-2">
               <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
@@ -227,10 +261,16 @@ export function AnalyticsView({
         </div>
         <div>
           <div className="text-xs" style={{ color: 'var(--ink-muted)' }}>
-            Time Typed
+            Daily Streak
           </div>
           <div className="font-mono-typing mt-1 text-2xl font-bold tabular-nums">
-            {formatDuration(summary.totalSeconds)}
+            {dailyStreak.currentStreak}{' '}
+            <span
+              className="font-ui text-xs font-normal"
+              style={{ color: 'var(--ink-muted)' }}
+            >
+              {dailyStreak.currentStreak === 1 ? 'day' : 'days'}
+            </span>
           </div>
         </div>
       </div>
@@ -359,11 +399,20 @@ export function AnalyticsView({
           className="mt-5 flex flex-wrap items-center justify-between gap-4 border-t pt-4 text-xs tabular-nums"
           style={{ borderColor: 'var(--border-hairline)' }}
         >
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <span style={{ color: 'var(--ink-muted)' }}>Selected Key:</span>
             <span className="font-mono-typing font-bold">
               {selectedKey === ' ' ? 'SPACE' : selectedKey.toUpperCase()}
             </span>
+            {canDrillSelected && (
+              <button
+                type="button"
+                onClick={() => onDrillKeys([selectedKey.toLowerCase()])}
+                className="keycap-mod cursor-pointer rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap"
+              >
+                Drill Key
+              </button>
+            )}
           </div>
 
           {selectedStat && selectedStat.presses > 0 ? (
@@ -497,7 +546,10 @@ function RecentTrendChart({ sessions }: { sessions: SessionRecord[] }) {
   const yFor = (wpm: number) => padTop + plotH - (wpm / yMax) * plotH;
 
   const path = sessions
-    .map((s, i) => `${i === 0 ? 'M' : 'L'} ${xFor(i).toFixed(1)} ${yFor(s.wpm).toFixed(1)}`)
+    .map(
+      (s, i) =>
+        `${i === 0 ? 'M' : 'L'} ${xFor(i).toFixed(1)} ${yFor(s.wpm).toFixed(1)}`
+    )
     .join(' ');
 
   const hovered = hoverIdx !== null ? sessions[hoverIdx] : null;

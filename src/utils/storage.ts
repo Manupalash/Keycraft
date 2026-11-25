@@ -1,14 +1,21 @@
-import { AppSettings, KeyStat, SessionRecord } from '../types/typing';
+import {
+  AppSettings,
+  DailyStreakData,
+  KeyStat,
+  SessionRecord,
+} from '../types/typing';
 
 const SETTINGS_KEY = 'keycraft_settings_v1';
 const HISTORY_KEY = 'keycraft_history_v1';
 const KEY_STATS_KEY = 'keycraft_key_stats_v1';
+const DAILY_STREAK_KEY = 'keycraft_daily_streak_v1';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   themeId: 'retro-pbt',
   caretStyle: 'line',
   fontSize: 'md',
   showKeyboard: true,
+  ghostEnabled: true,
   audio: {
     switchProfile: 'tactile',
     switchVolume: 0.72,
@@ -20,6 +27,20 @@ export const DEFAULT_SETTINGS: AppSettings = {
     },
   },
 };
+
+export const DEFAULT_DAILY_STREAK: DailyStreakData = {
+  lastPracticeDate: null,
+  currentStreak: 0,
+  longestStreak: 0,
+  todaySessions: 0,
+};
+
+export function getLocalDateString(date = new Date()): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
 
 export function loadSettings(): AppSettings {
   try {
@@ -77,6 +98,7 @@ export function clearHistoryStorage(): void {
   try {
     localStorage.removeItem(HISTORY_KEY);
     localStorage.removeItem(KEY_STATS_KEY);
+    localStorage.removeItem(DAILY_STREAK_KEY);
   } catch {
     // Ignore
   }
@@ -119,6 +141,103 @@ export function mergeKeyStats(
     // Ignore
   }
   return current;
+}
+
+export function loadDailyStreak(): DailyStreakData {
+  try {
+    const raw = localStorage.getItem(DAILY_STREAK_KEY);
+    if (!raw) return DEFAULT_DAILY_STREAK;
+    const parsed = JSON.parse(raw) as Partial<DailyStreakData>;
+    const today = getLocalDateString();
+    const yesterdayDate = new Date();
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterday = getLocalDateString(yesterdayDate);
+
+    const last = parsed.lastPracticeDate ?? null;
+    let currentStreak = parsed.currentStreak ?? 0;
+    let todaySessions = parsed.todaySessions ?? 0;
+
+    if (last !== today) {
+      todaySessions = 0;
+      if (last !== yesterday) {
+        currentStreak = 0;
+      }
+    }
+
+    return {
+      lastPracticeDate: last,
+      currentStreak,
+      longestStreak: parsed.longestStreak ?? currentStreak,
+      todaySessions,
+    };
+  } catch {
+    return DEFAULT_DAILY_STREAK;
+  }
+}
+
+export function recordPracticeDay(): DailyStreakData {
+  const current = loadDailyStreak();
+  const today = getLocalDateString();
+  const yesterdayDate = new Date();
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterday = getLocalDateString(yesterdayDate);
+
+  let nextStreak = current.currentStreak;
+  let nextTodaySessions = current.todaySessions;
+
+  if (current.lastPracticeDate === today) {
+    nextTodaySessions += 1;
+  } else if (current.lastPracticeDate === yesterday) {
+    nextStreak += 1;
+    nextTodaySessions = 1;
+  } else {
+    nextStreak = 1;
+    nextTodaySessions = 1;
+  }
+
+  const next: DailyStreakData = {
+    lastPracticeDate: today,
+    currentStreak: nextStreak,
+    longestStreak: Math.max(current.longestStreak, nextStreak),
+    todaySessions: nextTodaySessions,
+  };
+
+  try {
+    localStorage.setItem(DAILY_STREAK_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore
+  }
+  return next;
+}
+
+export function getBestWpmForMode(
+  history: SessionRecord[],
+  modeLabel: string
+): number {
+  let best = 0;
+  for (const s of history) {
+    if (s.modeLabel === modeLabel && s.wpm > best) {
+      best = s.wpm;
+    }
+  }
+  return best;
+}
+
+export function getTopWeakKeys(
+  keyStats: Record<string, KeyStat>,
+  limit = 4
+): string[] {
+  return Object.values(keyStats)
+    .filter(
+      (s) =>
+        s.presses >= 3 &&
+        s.errors > 0 &&
+        s.key.length === 1 &&
+        /[a-z0-9]/.test(s.key)
+    )
+    .sort((a, b) => b.errors / b.presses - a.errors / a.presses)
+    .slice(0, limit)
+    .map((s) => s.key);
 }
 
 export function calculateConsistency(rawValues: number[]): number {

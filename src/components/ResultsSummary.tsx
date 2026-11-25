@@ -1,18 +1,29 @@
 import { RotateCcw } from 'lucide-react';
-import { SessionRecord } from '../types/typing';
+import { DailyStreakData, SessionRecord } from '../types/typing';
 import { WpmTimelineChart } from './WpmTimelineChart';
 
 interface ResultsSummaryProps {
   session: SessionRecord;
+  dailyStreak: DailyStreakData;
   onNextTest: () => void;
   onRetrySame: () => void;
+  onDrillWeakKeys?: (keys: string[]) => void;
 }
 
 export function ResultsSummary({
   session,
+  dailyStreak,
   onNextTest,
   onRetrySame,
+  onDrillWeakKeys,
 }: ResultsSummaryProps) {
+  const prevBest = session.previousBestWpm ?? 0;
+  const deltaVsBest = prevBest > 0 ? session.wpm - prevBest : null;
+
+  const drillableWeakKeys = session.weakKeys
+    .map((wk) => wk.key)
+    .filter((k) => k.length === 1 && /[a-z0-9]/.test(k));
+
   return (
     <section
       className="mx-auto w-full max-w-4xl rounded-2xl p-7"
@@ -22,7 +33,7 @@ export function ResultsSummary({
       }}
     >
       <div className="mb-6 flex flex-wrap items-baseline justify-between gap-4">
-        <div className="flex items-baseline gap-4">
+        <div className="flex items-baseline gap-6">
           <div>
             <div
               className="text-xs font-medium"
@@ -30,11 +41,26 @@ export function ResultsSummary({
             >
               Net WPM
             </div>
-            <div
-              className="font-mono-typing text-5xl font-bold tracking-tight tabular-nums"
-              style={{ color: 'var(--accent)' }}
-            >
-              {session.wpm}
+            <div className="flex items-baseline gap-2.5">
+              <span
+                className="font-mono-typing text-5xl font-bold tracking-tight tabular-nums"
+                style={{ color: 'var(--accent)' }}
+              >
+                {session.wpm}
+              </span>
+              {deltaVsBest !== null && (
+                <span
+                  className="font-mono-typing text-xs font-semibold tabular-nums"
+                  style={{
+                    color:
+                      deltaVsBest >= 0
+                        ? 'var(--success)'
+                        : 'var(--ink-muted)',
+                  }}
+                >
+                  {deltaVsBest >= 0 ? `+${deltaVsBest}` : deltaVsBest} vs PB
+                </span>
+              )}
             </div>
           </div>
 
@@ -55,7 +81,7 @@ export function ResultsSummary({
         </div>
 
         <div
-          className="flex items-center gap-2 text-xs tabular-nums"
+          className="flex flex-wrap items-center gap-2 text-xs tabular-nums"
           style={{ color: 'var(--ink-muted)' }}
         >
           {session.isPersonalBest && (
@@ -72,6 +98,14 @@ export function ResultsSummary({
           <span>{session.modeLabel}</span>
           <span aria-hidden="true">·</span>
           <span>{session.durationSec}s</span>
+          {dailyStreak.currentStreak > 0 && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span style={{ color: 'var(--ink-primary)' }}>
+                {dailyStreak.currentStreak}-day streak
+              </span>
+            </>
+          )}
         </div>
       </div>
 
@@ -125,15 +159,18 @@ export function ResultsSummary({
             {session.weakKeys.length > 0
               ? session.weakKeys
                   .slice(0, 4)
-                  .map((wk) => `${wk.key === ' ' ? 'SPC' : wk.key.toUpperCase()} (${wk.errors})`)
+                  .map(
+                    (wk) =>
+                      `${wk.key === ' ' ? 'SPC' : wk.key.toUpperCase()} (${wk.errors})`
+                  )
                   .join(' · ')
-              : 'None'}
+              : 'Clean run'}
           </div>
         </div>
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={onNextTest}
@@ -149,6 +186,15 @@ export function ResultsSummary({
             <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
             <span>Retry Same</span>
           </button>
+          {drillableWeakKeys.length > 0 && onDrillWeakKeys && (
+            <button
+              type="button"
+              onClick={() => onDrillWeakKeys(drillableWeakKeys.slice(0, 4))}
+              className="keycap-mod cursor-pointer rounded-lg px-4 py-2.5 text-sm font-semibold whitespace-nowrap shrink-0"
+            >
+              Practice Weak Keys
+            </button>
+          )}
         </div>
 
         <span

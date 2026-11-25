@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AudioMixerPanel } from './components/AudioMixerPanel';
 import { AnalyticsView } from './components/AnalyticsView';
-import { PracticeView } from './components/PracticeView';
+import { DrillRequest, PracticeView } from './components/PracticeView';
 import { ThemesView } from './components/ThemesView';
 import { TopBar } from './components/TopBar';
 import { applyThemeTokens, getThemeById } from './data/themes';
 import {
   AppSettings,
+  DailyStreakData,
   KeyStat,
   NavTab,
   SessionRecord,
@@ -14,10 +15,12 @@ import {
 import { audioEngine } from './utils/audioEngine';
 import {
   clearHistoryStorage,
+  loadDailyStreak,
   loadHistory,
   loadKeyStats,
   loadSettings,
   mergeKeyStats,
+  recordPracticeDay,
   saveSession,
   saveSettings,
 } from './utils/storage';
@@ -29,6 +32,10 @@ export default function App() {
   const [keyStats, setKeyStats] = useState<Record<string, KeyStat>>(() =>
     loadKeyStats()
   );
+  const [dailyStreak, setDailyStreak] = useState<DailyStreakData>(() =>
+    loadDailyStreak()
+  );
+  const [drillRequest, setDrillRequest] = useState<DrillRequest | null>(null);
   const [isAudioPanelOpen, setIsAudioPanelOpen] = useState(false);
   const [isTypingRunning, setIsTypingRunning] = useState(false);
 
@@ -38,7 +45,6 @@ export default function App() {
     applyThemeTokens(theme);
   }, [settings.themeId]);
 
-  // Persist settings updates
   const handleUpdateSettings = useCallback((next: AppSettings) => {
     setSettings(next);
     saveSettings(next);
@@ -65,12 +71,17 @@ export default function App() {
   const handleSessionComplete = useCallback(
     (
       session: SessionRecord,
-      keyDelta: Record<string, { presses: number; errors: number; totalLatencyMs: number }>
+      keyDelta: Record<
+        string,
+        { presses: number; errors: number; totalLatencyMs: number }
+      >
     ) => {
       const updatedHistory = saveSession(session);
       const updatedKeys = mergeKeyStats(keyDelta);
+      const updatedStreak = recordPracticeDay();
       setHistory(updatedHistory);
       setKeyStats(updatedKeys);
+      setDailyStreak(updatedStreak);
     },
     []
   );
@@ -79,9 +90,14 @@ export default function App() {
     clearHistoryStorage();
     setHistory([]);
     setKeyStats({});
+    setDailyStreak(loadDailyStreak());
   }, []);
 
-  const bestWpm = history.reduce((max, item) => Math.max(max, item.wpm), 0);
+  const handleLaunchWeakDrill = useCallback((keys: string[]) => {
+    setDrillRequest({ keys, nonce: Date.now() });
+    setActiveTab('practice');
+    setIsAudioPanelOpen(false);
+  }, []);
 
   return (
     <div
@@ -118,7 +134,10 @@ export default function App() {
             settings={settings}
             onUpdateSettings={handleUpdateSettings}
             isAudioPanelOpen={isAudioPanelOpen}
-            bestWpm={bestWpm}
+            history={history}
+            keyStats={keyStats}
+            dailyStreak={dailyStreak}
+            drillRequest={drillRequest}
             onSessionComplete={handleSessionComplete}
             onRunningChange={setIsTypingRunning}
           />
@@ -128,9 +147,11 @@ export default function App() {
           <AnalyticsView
             history={history}
             keyStats={keyStats}
+            dailyStreak={dailyStreak}
             themeId={settings.themeId}
             onClearHistory={handleClearHistory}
             onGoToPractice={() => setActiveTab('practice')}
+            onDrillKeys={handleLaunchWeakDrill}
           />
         )}
 

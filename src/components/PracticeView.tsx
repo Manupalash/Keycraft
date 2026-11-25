@@ -7,9 +7,15 @@ import {
   useRef,
   useState,
 } from 'react';
-import { generateWordList, pickRandomQuote } from '../data/wordsAndQuotes';
+import {
+  generateWeakKeyDrill,
+  generateWordList,
+  pickRandomQuote,
+} from '../data/wordsAndQuotes';
 import {
   AppSettings,
+  DailyStreakData,
+  KeyStat,
   QuoteItem,
   QuoteLength,
   SecondSnapshot,
@@ -18,20 +24,35 @@ import {
   TypingMode,
 } from '../types/typing';
 import { audioEngine } from '../utils/audioEngine';
-import { calculateConsistency } from '../utils/storage';
+import {
+  calculateConsistency,
+  getBestWpmForMode,
+  getTopWeakKeys,
+} from '../utils/storage';
 import { ResultsSummary } from './ResultsSummary';
 import { TactileKeyboard } from './TactileKeyboard';
 
 type TestPhase = 'idle' | 'running' | 'finished';
 
+export interface DrillRequest {
+  keys: string[];
+  nonce: number;
+}
+
 interface PracticeViewProps {
   settings: AppSettings;
   onUpdateSettings: (next: AppSettings) => void;
   isAudioPanelOpen: boolean;
-  bestWpm: number;
+  history: SessionRecord[];
+  keyStats: Record<string, KeyStat>;
+  dailyStreak: DailyStreakData;
+  drillRequest: DrillRequest | null;
   onSessionComplete: (
     session: SessionRecord,
-    keyDelta: Record<string, { presses: number; errors: number; totalLatencyMs: number }>
+    keyDelta: Record<
+      string,
+      { presses: number; errors: number; totalLatencyMs: number }
+    >
   ) => void;
   onRunningChange: (isRunning: boolean) => void;
 }
@@ -43,7 +64,10 @@ export function PracticeView({
   settings,
   onUpdateSettings,
   isAudioPanelOpen,
-  bestWpm,
+  history,
+  keyStats,
+  dailyStreak,
+  drillRequest,
   onSessionComplete,
   onRunningChange,
 }: PracticeViewProps) {
@@ -52,6 +76,9 @@ export function PracticeView({
   const [quoteLength, setQuoteLength] = useState<QuoteLength>('medium');
   const [includePunctuation, setIncludePunctuation] = useState(false);
   const [includeNumbers, setIncludeNumbers] = useState(false);
+  const [weakDrillKeys, setWeakDrillKeys] = useState<string[]>(() =>
+    getTopWeakKeys(keyStats, 4)
+  );
 
   const [targetWords, setTargetWords] = useState<string[]>(() =>
     generateWordList(90, false, false)
@@ -66,6 +93,8 @@ export function PracticeView({
   const [liveWpm, setLiveWpm] = useState<number>(0);
   const [liveAccuracy, setLiveAccuracy] = useState<number>(100);
   const [streak, setStreak] = useState<number>(0);
+  const [streakMilestonePop, setStreakMilestonePop] = useState(false);
+  const [settledWordIndex, setSettledWordIndex] = useState<number | null>(null);
 
   const [pressedKey, setPressedKey] = useState<string | null>(null);
   const [lastErrorKey, setLastErrorKey] = useState<string | null>(null);
@@ -78,14 +107,24 @@ export function PracticeView({
     y: 0,
     h: 28,
   });
+  const [ghostCharTarget, setGhostCharTarget] = useState<{
+    wordIdx: number;
+    charIdx: number;
+  } | null>(null);
+  const [ghostCaretPos, setGhostCaretPos] = useState<{
+    x: number;
+    y: number;
+    h: number;
+  } | null>(null);
   const [scrollOffsetY, setScrollOffsetY] = useState(0);
 
   const hiddenInputRef = useRef<HTMLInputElement>(null);
   const wordsContainerRef = useRef<HTMLDivElement>(null);
   const activeCharRef = useRef<HTMLSpanElement | null>(null);
+  const ghostCharRef = useRef<HTMLSpanElement | null>(null);
   const keyPressTimerRef = useRef<number | null>(null);
 
-  // Mutable telemetry refs so timers never read stale React closures
+  // Mutable telemetry refs so timers never read stale closures
   const startTimeRef = useRef<number>(0);
   const lastKeyTimeRef = useRef<number>(0);
   const totalPressesRef = useRef<number>(0);
@@ -105,6 +144,22 @@ export function PracticeView({
   wordIndexRef.current = wordIndex;
   phaseRef.current = phase;
 
+  const currentModeLabel = useMemo(() => {
+    if (mode === 'timed') return `Timed ${duration}s`;
+    if (mode === 'quote') return `Quote · ${quoteLength}`;
+    return 'Weak Keys';
+  }, [mode, duration, quoteLength]);
+
+  const modeBestWpm = useMemo(
+    () => getBestWpmForMode(history, currentModeLabel),
+    [history, currentModeLabel]
+  );
+
+  const overallBestWpm = useMemo(
+    () => history.reduce((max, item) => Math.max(max, item.wpm), 0),
+    [history]
+  );
+
   useEffect(() => {
     onRunningChange(phase === 'running');
   }, [phase, onRunningChange]);
@@ -119,6 +174,59 @@ export function PracticeView({
     focusCanvas();
   }, [focusCanvas, mode, duration, quoteLength, phase]);
 
+  const clearSessionState = useCallback(
+    (nextDuration: number) => {
+      setTypedWords(['']);
+      typedWordsRef.current = [''];
+      setWordIndex(0);
+      wordIndexRef.current = 0;
+      setPhase('idle');
+      phaseRef.current = 'idle';
+      setTimeLeft(nextDuration);
+      setElapsedSec(0);
+      setLiveWpm(0);
+      setLiveAccuracy(100);
+      setStreak(0);
+      setSettledWordIndex(null);
+      setGhostCharTarget(null);
+      setGhostCaretPos(null);
+      setScrollOffsetY(0);
+      setCompletedSession(null);
+
+      startTimeRef.current = 0;
+      lastKeyTimeRef.current = 0;
+      totalPressesRef.current = 0;
+      correctPressesRef.current = 0;
+      errorsInCurrentSecRef.current = 0;
+      timelineRef.current = [];
+      keyDeltaRef.current = {};
+    },
+    []
+  );
+
+  const launchWeakKeysDrill = useCallback(
+    (keys: string[]) => {
+      const target = keys.length > 0 ? keys : getTopWeakKeys(keyStats, 4);
+      setMode('weak-keys');
+      setWeakDrillKeys(target);
+      const words = generateWeakKeyDrill(target, 35);
+      setActiveQuote(null);
+      setTargetWords(words);
+      targetWordsRef.current = words;
+      clearSessionState(duration);
+      setTimeout(() => {
+        hiddenInputRef.current?.focus({ preventScroll: true });
+      }, 0);
+    },
+    [keyStats, clearSessionState, duration]
+  );
+
+  // Triggered externally from ResultsSummary or AnalyticsView
+  useEffect(() => {
+    if (!drillRequest) return;
+    launchWeakKeysDrill(drillRequest.keys);
+  }, [drillRequest, launchWeakKeysDrill]);
+
   const resetSession = useCallback(
     (keepSamePrompt = false) => {
       if (!keepSamePrompt) {
@@ -131,45 +239,43 @@ export function PracticeView({
           setTargetWords(nextWords);
           targetWordsRef.current = nextWords;
           setActiveQuote(null);
-        } else {
+        } else if (mode === 'quote') {
           const q = pickRandomQuote(quoteLength, activeQuote?.id);
           const words = q.text.split(' ');
           setActiveQuote(q);
           setTargetWords(words);
           targetWordsRef.current = words;
+        } else {
+          const fallbackKeys =
+            weakDrillKeys.length > 0
+              ? weakDrillKeys
+              : getTopWeakKeys(keyStats, 4);
+          setWeakDrillKeys(fallbackKeys);
+          const words = generateWeakKeyDrill(fallbackKeys, 35);
+          setActiveQuote(null);
+          setTargetWords(words);
+          targetWordsRef.current = words;
         }
       }
 
-      setTypedWords(['']);
-      typedWordsRef.current = [''];
-      setWordIndex(0);
-      wordIndexRef.current = 0;
-      setPhase('idle');
-      phaseRef.current = 'idle';
-      setTimeLeft(duration);
-      setElapsedSec(0);
-      setLiveWpm(0);
-      setLiveAccuracy(100);
-      setStreak(0);
-      setScrollOffsetY(0);
-      setCompletedSession(null);
-
-      startTimeRef.current = 0;
-      lastKeyTimeRef.current = 0;
-      totalPressesRef.current = 0;
-      correctPressesRef.current = 0;
-      errorsInCurrentSecRef.current = 0;
-      timelineRef.current = [];
-      keyDeltaRef.current = {};
-
+      clearSessionState(duration);
       setTimeout(() => {
         hiddenInputRef.current?.focus({ preventScroll: true });
       }, 0);
     },
-    [mode, duration, quoteLength, includePunctuation, includeNumbers, activeQuote?.id]
+    [
+      mode,
+      duration,
+      quoteLength,
+      includePunctuation,
+      includeNumbers,
+      activeQuote?.id,
+      weakDrillKeys,
+      keyStats,
+      clearSessionState,
+    ]
   );
 
-  // Re-initialize prompt when mode/options change while not finished
   const handleSelectMode = (nextMode: TypingMode) => {
     setMode(nextMode);
     if (nextMode === 'timed') {
@@ -177,61 +283,31 @@ export function PracticeView({
       setTargetWords(words);
       targetWordsRef.current = words;
       setActiveQuote(null);
-    } else {
+    } else if (nextMode === 'quote') {
       const q = pickRandomQuote(quoteLength);
       const words = q.text.split(' ');
       setActiveQuote(q);
       setTargetWords(words);
       targetWordsRef.current = words;
+    } else {
+      const target = getTopWeakKeys(keyStats, 4);
+      setWeakDrillKeys(target);
+      const words = generateWeakKeyDrill(target, 35);
+      setActiveQuote(null);
+      setTargetWords(words);
+      targetWordsRef.current = words;
     }
-    setTypedWords(['']);
-    typedWordsRef.current = [''];
-    setWordIndex(0);
-    wordIndexRef.current = 0;
-    setPhase('idle');
-    phaseRef.current = 'idle';
-    setTimeLeft(duration);
-    setElapsedSec(0);
-    setLiveWpm(0);
-    setLiveAccuracy(100);
-    setStreak(0);
-    setScrollOffsetY(0);
-    setCompletedSession(null);
-    startTimeRef.current = 0;
-    lastKeyTimeRef.current = 0;
-    totalPressesRef.current = 0;
-    correctPressesRef.current = 0;
-    errorsInCurrentSecRef.current = 0;
-    timelineRef.current = [];
-    keyDeltaRef.current = {};
+    clearSessionState(duration);
   };
 
   const handleSelectDuration = (nextDur: TimedDuration) => {
     setDuration(nextDur);
-    setTimeLeft(nextDur);
     if (mode === 'timed') {
       const words = generateWordList(90, includePunctuation, includeNumbers);
       setTargetWords(words);
       targetWordsRef.current = words;
     }
-    setTypedWords(['']);
-    typedWordsRef.current = [''];
-    setWordIndex(0);
-    wordIndexRef.current = 0;
-    setPhase('idle');
-    phaseRef.current = 'idle';
-    setElapsedSec(0);
-    setLiveWpm(0);
-    setLiveAccuracy(100);
-    setStreak(0);
-    setScrollOffsetY(0);
-    setCompletedSession(null);
-    startTimeRef.current = 0;
-    totalPressesRef.current = 0;
-    correctPressesRef.current = 0;
-    errorsInCurrentSecRef.current = 0;
-    timelineRef.current = [];
-    keyDeltaRef.current = {};
+    clearSessionState(nextDur);
   };
 
   const handleSelectQuoteLength = (nextLen: QuoteLength) => {
@@ -241,24 +317,7 @@ export function PracticeView({
     setActiveQuote(q);
     setTargetWords(words);
     targetWordsRef.current = words;
-    setTypedWords(['']);
-    typedWordsRef.current = [''];
-    setWordIndex(0);
-    wordIndexRef.current = 0;
-    setPhase('idle');
-    phaseRef.current = 'idle';
-    setElapsedSec(0);
-    setLiveWpm(0);
-    setLiveAccuracy(100);
-    setStreak(0);
-    setScrollOffsetY(0);
-    setCompletedSession(null);
-    startTimeRef.current = 0;
-    totalPressesRef.current = 0;
-    correctPressesRef.current = 0;
-    errorsInCurrentSecRef.current = 0;
-    timelineRef.current = [];
-    keyDeltaRef.current = {};
+    clearSessionState(duration);
   };
 
   const computeCharTallies = useCallback(() => {
@@ -284,7 +343,6 @@ export function PracticeView({
           extra++;
         }
       }
-      // Count space between completed words if previous word was typed cleanly
       if (w < uWords.length - 1) {
         if (typed === target) {
           correct++;
@@ -320,7 +378,6 @@ export function PracticeView({
         ? Math.round((correctPressesRef.current / totalPressesRef.current) * 100)
         : 100;
 
-    // Ensure at least one final snapshot exists for very fast short quotes
     const snapshots = [...timelineRef.current];
     if (
       snapshots.length === 0 ||
@@ -340,15 +397,21 @@ export function PracticeView({
       .map(([k, s]) => ({ key: k, errors: s.errors, presses: s.presses }))
       .sort((a, b) => b.errors - a.errors);
 
-    const isPersonalBest = netWpm > bestWpm && netWpm > 0;
-    const modeLabel =
-      mode === 'timed' ? `Timed ${duration}s` : `Quote · ${quoteLength}`;
+    const previousBestForCompare =
+      modeBestWpm > 0 ? modeBestWpm : overallBestWpm;
+    const isPersonalBest = netWpm > overallBestWpm && netWpm > 0;
+
+    audioEngine.playCompletionChime(
+      isPersonalBest,
+      settings.audio.switchProfile,
+      settings.audio.switchVolume
+    );
 
     const record: SessionRecord = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       timestamp: Date.now(),
       mode,
-      modeLabel,
+      modeLabel: currentModeLabel,
       durationSec: actualElapsedSec,
       wpm: netWpm,
       rawWpm,
@@ -360,6 +423,8 @@ export function PracticeView({
       timeline: snapshots,
       weakKeys,
       isPersonalBest,
+      previousBestWpm: previousBestForCompare,
+      targetWeakKeys: mode === 'weak-keys' ? weakDrillKeys : undefined,
     };
 
     setCompletedSession(record);
@@ -367,13 +432,17 @@ export function PracticeView({
   }, [
     mode,
     duration,
-    quoteLength,
-    bestWpm,
+    currentModeLabel,
+    modeBestWpm,
+    overallBestWpm,
+    weakDrillKeys,
+    settings.audio.switchProfile,
+    settings.audio.switchVolume,
     computeCharTallies,
     onSessionComplete,
   ]);
 
-  // 1-second precision timer loop during running state
+  // 1-second telemetry sampling timer
   useEffect(() => {
     if (phase !== 'running') return;
 
@@ -418,25 +487,91 @@ export function PracticeView({
     return () => window.clearInterval(interval);
   }, [phase, mode, duration, computeCharTallies, finishTest]);
 
-  // Smooth caret position and 3-line auto-scroll measurement
+  // Smooth Ghost Pace-Maker animation loop
+  useEffect(() => {
+    if (phase !== 'running' || !settings.ghostEnabled || modeBestWpm <= 0) {
+      setGhostCharTarget(null);
+      setGhostCaretPos(null);
+      return;
+    }
+
+    let rafId = 0;
+    const charsPerSec = (modeBestWpm * 5) / 60;
+
+    const tick = () => {
+      const elapsed = Math.max(0, (performance.now() - startTimeRef.current) / 1000);
+      let remainingChars = Math.floor(elapsed * charsPerSec);
+      const words = targetWordsRef.current;
+
+      let wIdx = 0;
+      let cIdx = 0;
+      while (wIdx < words.length) {
+        const len = words[wIdx].length;
+        if (remainingChars <= len) {
+          cIdx = remainingChars;
+          break;
+        }
+        remainingChars -= len + 1; // +1 for space between words
+        wIdx++;
+      }
+
+      if (wIdx >= words.length) {
+        wIdx = words.length - 1;
+        cIdx = words[wIdx]?.length ?? 0;
+      }
+
+      setGhostCharTarget((prev) =>
+        prev && prev.wordIdx === wIdx && prev.charIdx === cIdx
+          ? prev
+          : { wordIdx: wIdx, charIdx: cIdx }
+      );
+
+      if (phaseRef.current === 'running') {
+        rafId = window.requestAnimationFrame(tick);
+      }
+    };
+
+    rafId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [phase, settings.ghostEnabled, modeBestWpm]);
+
+  // Measure active user caret & ghost caret coordinates
   useLayoutEffect(() => {
     const targetEl = activeCharRef.current;
     const containerEl = wordsContainerRef.current;
-    if (!targetEl || !containerEl) return;
+    if (targetEl && containerEl) {
+      const x = targetEl.offsetLeft;
+      const y = targetEl.offsetTop;
+      const h = targetEl.offsetHeight || 28;
+      setCaretPos({ x, y, h });
 
-    const x = targetEl.offsetLeft;
-    const y = targetEl.offsetTop;
-    const h = targetEl.offsetHeight || 28;
-
-    setCaretPos({ x, y, h });
-
-    const lineHeight = h + 12;
-    if (y > lineHeight * 1.4) {
-      setScrollOffsetY(y - lineHeight);
-    } else {
-      setScrollOffsetY(0);
+      const lineHeight = h + 12;
+      if (y > lineHeight * 1.4) {
+        setScrollOffsetY(y - lineHeight);
+      } else {
+        setScrollOffsetY(0);
+      }
     }
-  }, [typedWords, wordIndex, targetWords, settings.fontSize, phase]);
+
+    const ghostEl = ghostCharRef.current;
+    if (ghostEl && settings.ghostEnabled && phase === 'running') {
+      setGhostCaretPos({
+        x: ghostEl.offsetLeft,
+        y: ghostEl.offsetTop,
+        h: ghostEl.offsetHeight || 28,
+      });
+    } else {
+      setGhostCaretPos(null);
+    }
+  }, [
+    typedWords,
+    wordIndex,
+    targetWords,
+    settings.fontSize,
+    settings.ghostEnabled,
+    ghostCharTarget,
+    phase,
+  ]);
 
   const flashKeycap = (key: string, isError: boolean) => {
     setPressedKey(key);
@@ -479,6 +614,18 @@ export function PracticeView({
     return () => window.removeEventListener('keydown', onWindowKeyDown);
   }, [isAudioPanelOpen, tabArmed, resetSession]);
 
+  const triggerStreakCheck = (nextStreak: number) => {
+    if (nextStreak > 0 && nextStreak % 25 === 0) {
+      setStreakMilestonePop(true);
+      window.setTimeout(() => setStreakMilestonePop(false), 260);
+      audioEngine.playMilestoneTick(
+        nextStreak,
+        settings.audio.switchProfile,
+        settings.audio.switchVolume
+      );
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (isAudioPanelOpen || phaseRef.current === 'finished') return;
     if (e.metaKey || e.altKey) return;
@@ -508,8 +655,10 @@ export function PracticeView({
       if (currWord.length > 0) {
         currentTyped[idx] = currWord.slice(0, -1);
         setTypedWords(currentTyped);
-      } else if (idx > 0 && currentTyped[idx - 1] !== targetWordsRef.current[idx - 1]) {
-        // Step back only into mistyped previous words
+      } else if (
+        idx > 0 &&
+        currentTyped[idx - 1] !== targetWordsRef.current[idx - 1]
+      ) {
         currentTyped.pop();
         setTypedWords(currentTyped);
         setWordIndex(idx - 1);
@@ -517,7 +666,6 @@ export function PracticeView({
       return;
     }
 
-    // Spacebar advances to next word
     if (e.key === ' ') {
       e.preventDefault();
       const idx = wordIndexRef.current;
@@ -538,7 +686,15 @@ export function PracticeView({
       totalPressesRef.current += 1;
       if (isSpaceClean) {
         correctPressesRef.current += 1;
-        setStreak((s) => s + 1);
+        setSettledWordIndex(idx);
+        window.setTimeout(() => {
+          setSettledWordIndex((curr) => (curr === idx ? null : curr));
+        }, 160);
+        setStreak((s) => {
+          const next = s + 1;
+          triggerStreakCheck(next);
+          return next;
+        });
       } else {
         errorsInCurrentSecRef.current += 1;
         setStreak(0);
@@ -571,13 +727,14 @@ export function PracticeView({
         Math.round((correctPressesRef.current / totalPressesRef.current) * 100)
       );
 
-      // Quote ends when completing last word
-      if (mode === 'quote' && idx >= targetWordsRef.current.length - 1) {
+      if (
+        (mode === 'quote' || mode === 'weak-keys') &&
+        idx >= targetWordsRef.current.length - 1
+      ) {
         finishTest();
         return;
       }
 
-      // Timed mode appends fresh words smoothly as you near the buffer end
       if (mode === 'timed' && idx > targetWordsRef.current.length - 30) {
         const extra = generateWordList(60, includePunctuation, includeNumbers);
         const merged = [...targetWordsRef.current, ...extra];
@@ -591,7 +748,6 @@ export function PracticeView({
       return;
     }
 
-    // Printable single character
     if (e.key.length === 1 && !e.ctrlKey) {
       e.preventDefault();
 
@@ -620,7 +776,11 @@ export function PracticeView({
       totalPressesRef.current += 1;
       if (isCorrect) {
         correctPressesRef.current += 1;
-        setStreak((s) => s + 1);
+        setStreak((s) => {
+          const next = s + 1;
+          triggerStreakCheck(next);
+          return next;
+        });
       } else {
         errorsInCurrentSecRef.current += 1;
         setStreak(0);
@@ -655,9 +815,8 @@ export function PracticeView({
       );
       flashKeycap(e.key, !isCorrect);
 
-      // Immediate finish on final matching character of a quote
       if (
-        mode === 'quote' &&
+        (mode === 'quote' || mode === 'weak-keys') &&
         idx === targetWordsRef.current.length - 1 &&
         nextWordVal === targetWord
       ) {
@@ -680,12 +839,21 @@ export function PracticeView({
       <div className="py-6">
         <ResultsSummary
           session={completedSession}
+          dailyStreak={dailyStreak}
           onNextTest={() => resetSession(false)}
           onRetrySame={() => resetSession(true)}
+          onDrillWeakKeys={(keys) => launchWeakKeysDrill(keys)}
         />
       </div>
     );
   }
+
+  const streakLabel =
+    dailyStreak.currentStreak > 0
+      ? dailyStreak.todaySessions > 0
+        ? `${dailyStreak.currentStreak}-day streak · Today complete`
+        : `${dailyStreak.currentStreak}-day streak`
+      : 'Start daily streak today';
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 py-4">
@@ -728,6 +896,21 @@ export function PracticeView({
           >
             Quotes
           </button>
+          <button
+            type="button"
+            onClick={() => handleSelectMode('weak-keys')}
+            className="cursor-pointer rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors"
+            style={{
+              backgroundColor:
+                mode === 'weak-keys' ? 'var(--accent)' : 'transparent',
+              color:
+                mode === 'weak-keys'
+                  ? 'var(--accent-ink)'
+                  : 'var(--ink-muted)',
+            }}
+          >
+            Weak Keys
+          </button>
 
           <span
             className="mx-1 h-4 w-px"
@@ -735,7 +918,7 @@ export function PracticeView({
             aria-hidden="true"
           />
 
-          {mode === 'timed' ? (
+          {mode === 'timed' && (
             <>
               {TIMED_OPTIONS.map((sec) => (
                 <button
@@ -768,10 +951,7 @@ export function PracticeView({
                   const words = generateWordList(90, next, includeNumbers);
                   setTargetWords(words);
                   targetWordsRef.current = words;
-                  setTypedWords(['']);
-                  setWordIndex(0);
-                  setPhase('idle');
-                  setTimeLeft(duration);
+                  clearSessionState(duration);
                 }}
                 className="cursor-pointer rounded-lg px-2.5 py-1.5 text-xs font-medium whitespace-nowrap"
                 style={{
@@ -793,10 +973,7 @@ export function PracticeView({
                   const words = generateWordList(90, includePunctuation, next);
                   setTargetWords(words);
                   targetWordsRef.current = words;
-                  setTypedWords(['']);
-                  setWordIndex(0);
-                  setPhase('idle');
-                  setTimeLeft(duration);
+                  clearSessionState(duration);
                 }}
                 className="cursor-pointer rounded-lg px-2.5 py-1.5 text-xs font-medium whitespace-nowrap"
                 style={{
@@ -811,7 +988,9 @@ export function PracticeView({
                 Numbers
               </button>
             </>
-          ) : (
+          )}
+
+          {mode === 'quote' &&
             QUOTE_LENGTHS.map((len) => (
               <button
                 key={len}
@@ -831,11 +1010,45 @@ export function PracticeView({
               >
                 {len}
               </button>
-            ))
+            ))}
+
+          {mode === 'weak-keys' && (
+            <span
+              className="font-mono-typing px-2 text-xs"
+              style={{ color: 'var(--ink-muted)' }}
+            >
+              {weakDrillKeys.length > 0
+                ? `Focus: ${weakDrillKeys.map((k) => k.toUpperCase()).join(' · ')}`
+                : 'Balanced Drill'}
+            </span>
           )}
         </div>
 
         <div className="flex items-center gap-2">
+          {modeBestWpm > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                onUpdateSettings({
+                  ...settings,
+                  ghostEnabled: !settings.ghostEnabled,
+                })
+              }
+              className="font-mono-typing cursor-pointer rounded-lg px-3 py-1.5 text-xs font-medium whitespace-nowrap tabular-nums"
+              style={{
+                backgroundColor: settings.ghostEnabled
+                  ? 'var(--bg-surface-alt)'
+                  : 'var(--bg-surface)',
+                border: '1px solid var(--border-hairline)',
+                color: settings.ghostEnabled
+                  ? 'var(--ink-primary)'
+                  : 'var(--ink-muted)',
+              }}
+            >
+              {settings.ghostEnabled ? `Ghost: ${modeBestWpm} WPM` : 'Ghost: Off'}
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() =>
@@ -867,7 +1080,7 @@ export function PracticeView({
       </div>
 
       {/* Live Telemetry HUD */}
-      <div className="flex items-baseline justify-between px-1">
+      <div className="flex flex-wrap items-baseline justify-between gap-4 px-1">
         <div className="flex items-baseline gap-8">
           <div>
             <span
@@ -916,7 +1129,9 @@ export function PracticeView({
               Streak
             </span>
             <span
-              className="font-mono-typing text-2xl font-bold tabular-nums"
+              className={`font-mono-typing inline-block text-2xl font-bold tabular-nums ${
+                streakMilestonePop ? 'streak-milestone-pop' : ''
+              }`}
               style={{
                 color: streak >= 25 ? 'var(--accent)' : 'var(--ink-primary)',
               }}
@@ -927,10 +1142,10 @@ export function PracticeView({
         </div>
 
         <span
-          className="font-mono-typing hidden text-xs sm:inline"
+          className="font-mono-typing hidden text-xs tabular-nums sm:inline"
           style={{ color: 'var(--ink-muted)' }}
         >
-          {phase === 'idle' ? 'Type to begin' : 'Tab + Enter to reset'}
+          {phase === 'idle' ? streakLabel : 'Tab + Enter to reset'}
         </span>
       </div>
 
@@ -969,18 +1184,35 @@ export function PracticeView({
               transform: `translate3d(0, -${scrollOffsetY}px, 0)`,
             }}
           >
-            {/* Hardware-accelerated Smooth Caret */}
+            {/* Ghost Pace-Maker Caret (Goal-Gradient Effect) */}
+            {ghostCaretPos && (
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute top-0 left-0 z-10 transition-transform duration-100 ease-linear"
+                style={{
+                  transform: `translate3d(${ghostCaretPos.x}px, ${ghostCaretPos.y + 3}px, 0)`,
+                  width: '2px',
+                  height: `${caretBoxHeight}px`,
+                  backgroundColor: 'var(--ink-muted)',
+                  opacity: 0.45,
+                }}
+              >
+                <span
+                  className="font-mono-typing absolute -top-3.5 -left-1.5 text-[9px] font-semibold tracking-tight"
+                  style={{ color: 'var(--ink-muted)' }}
+                >
+                  PB
+                </span>
+              </span>
+            )}
+
+            {/* Hardware-accelerated Smooth User Caret */}
             <span
               aria-hidden="true"
-              className="pointer-events-none absolute top-0 left-0 z-10 transition-transform duration-75 ease-out"
+              className="pointer-events-none absolute top-0 left-0 z-20 transition-transform duration-75 ease-out"
               style={{
                 transform: `translate3d(${caretPos.x}px, ${caretPos.y + 3}px, 0)`,
-                width:
-                  settings.caretStyle === 'line'
-                    ? '2.5px'
-                    : settings.caretStyle === 'block'
-                      ? '0.62ch'
-                      : '0.62ch',
+                width: settings.caretStyle === 'line' ? '2.5px' : '0.62ch',
                 height:
                   settings.caretStyle === 'underline'
                     ? '3px'
@@ -1002,11 +1234,14 @@ export function PracticeView({
               const extraChars =
                 typed.length > word.length ? typed.slice(word.length) : '';
               const hasWordError = isPast && typed !== word;
+              const isJustSettled = settledWordIndex === wIdx;
 
               return (
                 <span
                   key={`${wIdx}-${word}`}
-                  className="inline-flex items-center"
+                  className={`inline-flex items-center ${
+                    isJustSettled ? 'word-settled' : ''
+                  }`}
                   style={{
                     textDecoration: hasWordError ? 'underline' : 'none',
                     textDecorationColor: 'var(--error)',
@@ -1016,6 +1251,9 @@ export function PracticeView({
                   {word.split('').map((char, cIdx) => {
                     const typedChar = typed[cIdx];
                     const isCaretTarget = isCurrent && cIdx === typed.length;
+                    const isGhostTarget =
+                      ghostCharTarget?.wordIdx === wIdx &&
+                      ghostCharTarget?.charIdx === cIdx;
 
                     let charColor = 'var(--ink-upcoming)';
                     let bg = 'transparent';
@@ -1031,7 +1269,10 @@ export function PracticeView({
                     return (
                       <span
                         key={cIdx}
-                        ref={isCaretTarget ? activeCharRef : undefined}
+                        ref={(el) => {
+                          if (isCaretTarget) activeCharRef.current = el;
+                          if (isGhostTarget) ghostCharRef.current = el;
+                        }}
                         className="inline-block rounded-[2px]"
                         style={{ color: charColor, backgroundColor: bg }}
                       >
@@ -1053,9 +1294,21 @@ export function PracticeView({
                     </span>
                   ))}
 
-                  {isCurrent && typed.length >= word.length && (
+                  {((isCurrent && typed.length >= word.length) ||
+                    (ghostCharTarget?.wordIdx === wIdx &&
+                      ghostCharTarget?.charIdx >= word.length)) && (
                     <span
-                      ref={activeCharRef}
+                      ref={(el) => {
+                        if (isCurrent && typed.length >= word.length) {
+                          activeCharRef.current = el;
+                        }
+                        if (
+                          ghostCharTarget?.wordIdx === wIdx &&
+                          ghostCharTarget?.charIdx >= word.length
+                        ) {
+                          ghostCharRef.current = el;
+                        }
+                      }}
                       className="inline-block w-[0.01px]"
                       aria-hidden="true"
                     >

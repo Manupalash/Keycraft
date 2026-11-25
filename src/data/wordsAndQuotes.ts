@@ -29,6 +29,9 @@ export const COMMON_WORDS: string[] = [
   'build', 'shape', 'trace', 'focus', 'pause', 'drift', 'reach', 'carry',
   'measure', 'balance', 'pattern', 'detail', 'surface', 'motion', 'moment',
   'signal', 'memory', 'engine', 'spring', 'letter', 'anchor', 'bridge',
+  'quartz', 'velvet', 'spark', 'jacket', 'puzzle', 'breeze', 'bronze', 'vivid',
+  'exact', 'mixed', 'quick', 'quest', 'zebra', 'glyph', 'ivory', 'kiosk',
+  'knack', 'jolt', 'pivot', 'flock', 'ember', 'chalk', 'plank', 'whisk',
 ];
 
 const PUNCTUATION_SUFFIXES = [',', ',', '.', '.', ';', ':'];
@@ -68,6 +71,58 @@ export function generateWordList(
     }
 
     result.push(word);
+  }
+
+  return result;
+}
+
+export function generateWeakKeyDrill(targetKeys: string[], count = 35): string[] {
+  const cleanedKeys = Array.from(
+    new Set(
+      targetKeys
+        .map((k) => k.toLowerCase().trim())
+        .filter((k) => k.length === 1 && /[a-z0-9]/.test(k))
+    )
+  );
+
+  if (cleanedKeys.length === 0) {
+    return generateWordList(count, false, false);
+  }
+
+  // Score each word by how densely it exercises the target weak keys
+  const scored = COMMON_WORDS.map((word) => {
+    let score = 0;
+    for (const ch of word) {
+      const idx = cleanedKeys.indexOf(ch);
+      if (idx !== -1) {
+        // Higher weight for the top-most missed key
+        score += cleanedKeys.length - idx;
+      }
+    }
+    return { word, score };
+  });
+
+  const matchingPool = scored
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(24, Math.min(60, scored.length)));
+
+  const pool =
+    matchingPool.length >= 6
+      ? matchingPool.map((m) => m.word)
+      : COMMON_WORDS;
+
+  const result: string[] = [];
+  let prev = '';
+  for (let i = 0; i < count; i++) {
+    let candidate = pool[Math.floor(Math.random() * pool.length)];
+    if (pool.length > 1) {
+      while (candidate === prev) {
+        candidate = pool[Math.floor(Math.random() * pool.length)];
+      }
+    }
+    prev = candidate;
+    result.push(candidate);
   }
 
   return result;

@@ -11,7 +11,7 @@ export type SwitchProfile = 'tactile' | 'clicky' | 'thocky' | 'muted';
 
 export type AmbientTrack = 'rain' | 'cafe' | 'brownNoise';
 
-export type TypingMode = 'timed' | 'quote';
+export type TypingMode = 'timed' | 'quote' | 'weak-keys';
 
 export type TimedDuration = 15 | 30 | 60 | 120;
 
@@ -60,6 +60,7 @@ export interface AppSettings {
   caretStyle: CaretStyle;
   fontSize: FontSizeOption;
   showKeyboard: boolean;
+  ghostEnabled: boolean;
   audio: AudioSettings;
 }
 
@@ -84,6 +85,13 @@ export interface KeyStat {
   totalLatencyMs: number;
 }
 
+export interface DailyStreakData {
+  lastPracticeDate: string | null;
+  currentStreak: number;
+  longestStreak: number;
+  todaySessions: number;
+}
+
 export interface SessionRecord {
   id: string;
   timestamp: number;
@@ -100,4 +108,6 @@ export interface SessionRecord {
   timeline: SecondSnapshot[];
   weakKeys: { key: string; errors: number; presses: number }[];
   isPersonalBest?: boolean;
+  previousBestWpm?: number;
+  targetWeakKeys?: string[];
 }
