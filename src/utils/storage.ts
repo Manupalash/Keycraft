@@ -42,20 +42,32 @@ export function getLocalDateString(date = new Date()): string {
   return `${y}-${m}-${d}`;
 }
 
+function clampUnit(n: unknown, fallback: number): number {
+  return typeof n === 'number' && Number.isFinite(n)
+    ? Math.min(1, Math.max(0, n))
+    : fallback;
+}
+
 export function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    if (!parsed || typeof parsed !== 'object') return DEFAULT_SETTINGS;
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
       audio: {
         ...DEFAULT_SETTINGS.audio,
         ...(parsed.audio ?? {}),
+        switchVolume: clampUnit(
+          parsed.audio?.switchVolume,
+          DEFAULT_SETTINGS.audio.switchVolume
+        ),
         ambientVolumes: {
-          ...DEFAULT_SETTINGS.audio.ambientVolumes,
-          ...(parsed.audio?.ambientVolumes ?? {}),
+          rain: clampUnit(parsed.audio?.ambientVolumes?.rain, 0),
+          cafe: clampUnit(parsed.audio?.ambientVolumes?.cafe, 0),
+          brownNoise: clampUnit(parsed.audio?.ambientVolumes?.brownNoise, 0),
         },
       },
     };
@@ -77,7 +89,15 @@ export function loadHistory(): SessionRecord[] {
     const raw = localStorage.getItem(HISTORY_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as SessionRecord[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is SessionRecord =>
+        Boolean(item) &&
+        typeof item === 'object' &&
+        typeof item.id === 'string' &&
+        typeof item.wpm === 'number' &&
+        typeof item.accuracy === 'number'
+    );
   } catch {
     return [];
   }
@@ -85,6 +105,9 @@ export function loadHistory(): SessionRecord[] {
 
 export function saveSession(record: SessionRecord): SessionRecord[] {
   const existing = loadHistory();
+  if (existing.some((item) => item.id === record.id)) {
+    return existing;
+  }
   const updated = [record, ...existing].slice(0, 150);
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
@@ -109,9 +132,20 @@ export function loadKeyStats(): Record<string, KeyStat> {
     const raw = localStorage.getItem(KEY_STATS_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object'
-      ? (parsed as Record<string, KeyStat>)
-      : {};
+    if (!parsed || typeof parsed !== 'object') return {};
+    const clean: Record<string, KeyStat> = {};
+    Object.entries(parsed as Record<string, unknown>).forEach(([k, v]) => {
+      if (
+        v &&
+        typeof v === 'object' &&
+        typeof (v as KeyStat).presses === 'number' &&
+        typeof (v as KeyStat).errors === 'number' &&
+        typeof (v as KeyStat).totalLatencyMs === 'number'
+      ) {
+        clean[k] = v as KeyStat;
+      }
+    });
+    return clean;
   } catch {
     return {};
   }
@@ -154,8 +188,10 @@ export function loadDailyStreak(): DailyStreakData {
     const yesterday = getLocalDateString(yesterdayDate);
 
     const last = parsed.lastPracticeDate ?? null;
-    let currentStreak = parsed.currentStreak ?? 0;
-    let todaySessions = parsed.todaySessions ?? 0;
+    let currentStreak =
+      typeof parsed.currentStreak === 'number' ? parsed.currentStreak : 0;
+    let todaySessions =
+      typeof parsed.todaySessions === 'number' ? parsed.todaySessions : 0;
 
     if (last !== today) {
       todaySessions = 0;
@@ -167,7 +203,10 @@ export function loadDailyStreak(): DailyStreakData {
     return {
       lastPracticeDate: last,
       currentStreak,
-      longestStreak: parsed.longestStreak ?? currentStreak,
+      longestStreak:
+        typeof parsed.longestStreak === 'number'
+          ? Math.max(parsed.longestStreak, currentStreak)
+          : currentStreak,
       todaySessions,
     };
   } catch {

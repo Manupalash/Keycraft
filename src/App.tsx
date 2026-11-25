@@ -45,28 +45,33 @@ export default function App() {
     applyThemeTokens(theme);
   }, [settings.themeId]);
 
+  // Keep AudioEngine desired volumes synced without re-registering gesture listeners
+  useEffect(() => {
+    audioEngine.configureDesiredState(
+      settings.audio.ambientVolumes,
+      settings.audio.masterMuted
+    );
+  }, [settings.audio.ambientVolumes, settings.audio.masterMuted]);
+
+  // Unlock AudioContext once on first user gesture
+  useEffect(() => {
+    const unlock = () => {
+      audioEngine.unlockFromGesture();
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+    window.addEventListener('pointerdown', unlock, { once: true });
+    window.addEventListener('keydown', unlock, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
+
   const handleUpdateSettings = useCallback((next: AppSettings) => {
     setSettings(next);
     saveSettings(next);
   }, []);
-
-  // Sync ambient audio on first interaction if saved volumes were non-zero
-  useEffect(() => {
-    const unlockAmbient = () => {
-      audioEngine.syncAmbientState(
-        settings.audio.ambientVolumes,
-        settings.audio.masterMuted
-      );
-      window.removeEventListener('pointerdown', unlockAmbient);
-      window.removeEventListener('keydown', unlockAmbient);
-    };
-    window.addEventListener('pointerdown', unlockAmbient, { once: true });
-    window.addEventListener('keydown', unlockAmbient, { once: true });
-    return () => {
-      window.removeEventListener('pointerdown', unlockAmbient);
-      window.removeEventListener('keydown', unlockAmbient);
-    };
-  }, [settings.audio.ambientVolumes, settings.audio.masterMuted]);
 
   const handleSessionComplete = useCallback(
     (
@@ -97,6 +102,10 @@ export default function App() {
     setDrillRequest({ keys, nonce: Date.now() });
     setActiveTab('practice');
     setIsAudioPanelOpen(false);
+  }, []);
+
+  const handleConsumeDrillRequest = useCallback(() => {
+    setDrillRequest(null);
   }, []);
 
   return (
@@ -138,6 +147,7 @@ export default function App() {
             keyStats={keyStats}
             dailyStreak={dailyStreak}
             drillRequest={drillRequest}
+            onConsumeDrillRequest={handleConsumeDrillRequest}
             onSessionComplete={handleSessionComplete}
             onRunningChange={setIsTypingRunning}
           />

@@ -1,5 +1,7 @@
 import { AmbientTrack, SwitchProfile } from '../types/typing';
 
+type AudioLifecycleState = 'uninitialized' | 'ready';
+
 interface AmbientNodeGroup {
   source: AudioBufferSourceNode;
   gain: GainNode;
@@ -7,37 +9,79 @@ interface AmbientNodeGroup {
 }
 
 class MechanicalAudioEngine {
+  private lifecycle: AudioLifecycleState = 'uninitialized';
   private ctx: AudioContext | null = null;
   private noiseBuffer: AudioBuffer | null = null;
   private ambientNodes: Partial<Record<AmbientTrack, AmbientNodeGroup>> = {};
   private ambientMasterGain: GainNode | null = null;
   private masterMuted = false;
+  private desiredAmbientVolumes: Record<AmbientTrack, number> = {
+    rain: 0,
+    cafe: 0,
+    brownNoise: 0,
+  };
 
   private ensureContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
-    if (!this.ctx) {
-      const AudioCtx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext })
-          .webkitAudioContext;
-      if (!AudioCtx) return null;
-      this.ctx = new AudioCtx();
+    try {
+      if (!this.ctx) {
+        const AudioCtx =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext: typeof AudioContext })
+            .webkitAudioContext;
+        if (!AudioCtx) return null;
+        this.ctx = new AudioCtx();
+      }
+      if (this.ctx.state === 'suspended') {
+        void this.ctx.resume();
+      }
+      if (!this.noiseBuffer && this.ctx) {
+        this.noiseBuffer = this.createWhiteNoiseBuffer(this.ctx, 3);
+      }
+      if (!this.ambientMasterGain && this.ctx) {
+        this.ambientMasterGain = this.ctx.createGain();
+        this.ambientMasterGain.gain.value = this.masterMuted ? 0 : 1;
+        this.ambientMasterGain.connect(this.ctx.destination);
+      }
+      this.lifecycle = 'ready';
+      return this.ctx;
+    } catch {
+      return null;
     }
-    if (this.ctx.state === 'suspended') {
-      void this.ctx.resume();
-    }
-    if (!this.noiseBuffer && this.ctx) {
-      this.noiseBuffer = this.createWhiteNoiseBuffer(this.ctx, 3);
-    }
-    if (!this.ambientMasterGain && this.ctx) {
-      this.ambientMasterGain = this.ctx.createGain();
-      this.ambientMasterGain.gain.value = this.masterMuted ? 0 : 1;
-      this.ambientMasterGain.connect(this.ctx.destination);
-    }
-    return this.ctx;
   }
 
-  private createWhiteNoiseBuffer(ctx: AudioContext, seconds: number): AudioBuffer {
+  public unlockFromGesture(): void {
+    if (this.lifecycle === 'ready') return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    (Object.keys(this.desiredAmbientVolumes) as AmbientTrack[]).forEach(
+      (track) => {
+        if (this.desiredAmbientVolumes[track] > 0.01) {
+          this.updateAmbientTrack(track, this.desiredAmbientVolumes[track]);
+        }
+      }
+    );
+  }
+
+  public configureDesiredState(
+    volumes: Record<AmbientTrack, number>,
+    masterMuted: boolean
+  ): void {
+    this.desiredAmbientVolumes = { ...volumes };
+    this.setMasterMuted(masterMuted);
+    if (this.lifecycle === 'ready') {
+      (Object.keys(volumes) as AmbientTrack[]).forEach((track) => {
+        if (volumes[track] > 0.01 || this.ambientNodes[track]) {
+          this.updateAmbientTrack(track, volumes[track]);
+        }
+      });
+    }
+  }
+
+  private createWhiteNoiseBuffer(
+    ctx: AudioContext,
+    seconds: number
+  ): AudioBuffer {
     const length = ctx.sampleRate * seconds;
     const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
     const data = buffer.getChannelData(0);
@@ -47,7 +91,10 @@ class MechanicalAudioEngine {
     return buffer;
   }
 
-  private createBrownNoiseBuffer(ctx: AudioContext, seconds: number): AudioBuffer {
+  private createBrownNoiseBuffer(
+    ctx: AudioContext,
+    seconds: number
+  ): AudioBuffer {
     const length = ctx.sampleRate * seconds;
     const buffer = ctx.createBuffer(2, length, ctx.sampleRate);
     for (let ch = 0; ch < 2; ch++) {
@@ -58,11 +105,11 @@ class MechanicalAudioEngine {
         lastOut = (lastOut + 0.02 * white) / 1.02;
         data[i] = lastOut * 3.4;
       }
-      // Crossfade loop boundary to eliminate any seam
       const fadeSamples = Math.min(2048, Math.floor(length / 10));
       for (let i = 0; i < fadeSamples; i++) {
         const ratio = i / fadeSamples;
-        data[i] = data[i] * ratio + data[length - fadeSamples + i] * (1 - ratio);
+        data[i] =
+          data[i] * ratio + data[length - fadeSamples + i] * (1 - ratio);
       }
     }
     return buffer;
@@ -73,27 +120,34 @@ class MechanicalAudioEngine {
     const buffer = ctx.createBuffer(2, length, ctx.sampleRate);
     for (let ch = 0; ch < 2; ch++) {
       const data = buffer.getChannelData(ch);
-      let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+      let b0 = 0,
+        b1 = 0,
+        b2 = 0,
+        b3 = 0,
+        b4 = 0,
+        b5 = 0,
+        b6 = 0;
       for (let i = 0; i < length; i++) {
         const white = Math.random() * 2 - 1;
         b0 = 0.99886 * b0 + white * 0.0555179;
         b1 = 0.99332 * b1 + white * 0.0750759;
-        b2 = 0.96900 * b2 + white * 0.1538520;
-        b3 = 0.86650 * b3 + white * 0.3104856;
-        b4 = 0.55000 * b4 + white * 0.5329522;
-        b5 = -0.7616 * b5 - white * 0.0168980;
-        let sample = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.08;
+        b2 = 0.969 * b2 + white * 0.153852;
+        b3 = 0.8665 * b3 + white * 0.3104856;
+        b4 = 0.55 * b4 + white * 0.5329522;
+        b5 = -0.7616 * b5 - white * 0.016898;
+        let sample =
+          (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.08;
         b6 = white * 0.115926;
-        // Subtle gentle raindrop transient speckles
         if (Math.random() < 0.0012) {
-          sample += (Math.random() * 0.4 - 0.2);
+          sample += Math.random() * 0.4 - 0.2;
         }
         data[i] = Math.max(-1, Math.min(1, sample));
       }
       const fadeSamples = Math.min(4096, Math.floor(length / 10));
       for (let i = 0; i < fadeSamples; i++) {
         const ratio = i / fadeSamples;
-        data[i] = data[i] * ratio + data[length - fadeSamples + i] * (1 - ratio);
+        data[i] =
+          data[i] * ratio + data[length - fadeSamples + i] * (1 - ratio);
       }
     }
     return buffer;
@@ -126,14 +180,15 @@ class MechanicalAudioEngine {
     if (!ctx || !this.noiseBuffer) return;
 
     const now = ctx.currentTime;
-    const isSpaceOrModifier = key === ' ' || key === 'Enter' || key === 'Backspace';
+    const isSpaceOrModifier =
+      key === ' ' || key === 'Enter' || key === 'Backspace';
     const pitchFactor = isSpaceOrModifier
       ? 0.78
       : 0.94 + ((key.charCodeAt(0) % 13) / 13) * 0.14;
-    const masterGain = Math.min(1, Math.max(0, volume)) * (isError ? 0.5 : 0.75);
+    const masterGain =
+      Math.min(1, Math.max(0, volume)) * (isError ? 0.5 : 0.75);
 
     if (isError) {
-      // Muted, dull bottom-out tap so errors feel distinct without harsh beeps
       const osc = ctx.createOscillator();
       const g = ctx.createGain();
       osc.type = 'triangle';
@@ -149,7 +204,6 @@ class MechanicalAudioEngine {
     }
 
     if (profile === 'tactile') {
-      // Crisp noise snap + warm tactile housing thump
       const noise = ctx.createBufferSource();
       noise.buffer = this.noiseBuffer;
       const bp = ctx.createBiquadFilter();
@@ -167,7 +221,10 @@ class MechanicalAudioEngine {
       const bodyOsc = ctx.createOscillator();
       bodyOsc.type = 'triangle';
       bodyOsc.frequency.setValueAtTime(195 * pitchFactor, now);
-      bodyOsc.frequency.exponentialRampToValueAtTime(88 * pitchFactor, now + 0.032);
+      bodyOsc.frequency.exponentialRampToValueAtTime(
+        88 * pitchFactor,
+        now + 0.032
+      );
       const bg = ctx.createGain();
       bg.gain.setValueAtTime(masterGain * 0.36, now);
       bg.gain.exponentialRampToValueAtTime(0.001, now + 0.036);
@@ -176,7 +233,6 @@ class MechanicalAudioEngine {
       bodyOsc.start(now);
       bodyOsc.stop(now + 0.04);
     } else if (profile === 'clicky') {
-      // Sharp click-jacket snap
       const noise = ctx.createBufferSource();
       noise.buffer = this.noiseBuffer;
       const hp = ctx.createBiquadFilter();
@@ -194,7 +250,10 @@ class MechanicalAudioEngine {
       const snapOsc = ctx.createOscillator();
       snapOsc.type = 'sine';
       snapOsc.frequency.setValueAtTime(980 * pitchFactor, now);
-      snapOsc.frequency.exponentialRampToValueAtTime(320 * pitchFactor, now + 0.014);
+      snapOsc.frequency.exponentialRampToValueAtTime(
+        320 * pitchFactor,
+        now + 0.014
+      );
       const sg = ctx.createGain();
       sg.gain.setValueAtTime(masterGain * 0.25, now);
       sg.gain.exponentialRampToValueAtTime(0.001, now + 0.016);
@@ -203,7 +262,6 @@ class MechanicalAudioEngine {
       snapOsc.start(now);
       snapOsc.stop(now + 0.02);
     } else if (profile === 'thocky') {
-      // Deep PBT keycap thock
       const noise = ctx.createBufferSource();
       noise.buffer = this.noiseBuffer;
       const lp = ctx.createBiquadFilter();
@@ -220,7 +278,10 @@ class MechanicalAudioEngine {
       const thockOsc = ctx.createOscillator();
       thockOsc.type = 'sine';
       thockOsc.frequency.setValueAtTime(145 * pitchFactor, now);
-      thockOsc.frequency.exponentialRampToValueAtTime(62 * pitchFactor, now + 0.048);
+      thockOsc.frequency.exponentialRampToValueAtTime(
+        62 * pitchFactor,
+        now + 0.048
+      );
       const tg = ctx.createGain();
       tg.gain.setValueAtTime(masterGain * 0.5, now);
       tg.gain.exponentialRampToValueAtTime(0.001, now + 0.052);
@@ -233,6 +294,8 @@ class MechanicalAudioEngine {
 
   public updateAmbientTrack(track: AmbientTrack, volume: number): void {
     const clamped = Math.min(1, Math.max(0, volume));
+    this.desiredAmbientVolumes[track] = clamped;
+
     if (clamped <= 0.01) {
       const existing = this.ambientNodes[track];
       if (existing && this.ctx) {
@@ -242,7 +305,7 @@ class MechanicalAudioEngine {
         existing.gain.gain.linearRampToValueAtTime(0, now + 0.12);
         const toStop = existing;
         delete this.ambientNodes[track];
-        setTimeout(() => {
+        window.setTimeout(() => {
           try {
             toStop.source.stop();
             toStop.lfo?.stop();
@@ -298,7 +361,6 @@ class MechanicalAudioEngine {
     }
 
     if (track === 'cafe') {
-      // Warm distant cafe room murmur with subtle slow swell
       source.buffer = this.createBrownNoiseBuffer(ctx, 6);
       const bp = ctx.createBiquadFilter();
       bp.type = 'bandpass';
@@ -321,7 +383,6 @@ class MechanicalAudioEngine {
       return { source, gain, lfo };
     }
 
-    // Warm brown noise
     source.buffer = this.createBrownNoiseBuffer(ctx, 6);
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
@@ -343,7 +404,6 @@ class MechanicalAudioEngine {
     if (!ctx) return;
 
     const now = ctx.currentTime;
-    // Gentle ascending pentatonic interval as streak climbs
     const tier = Math.min(4, Math.floor(streak / 25));
     const freqs = [523.25, 587.33, 659.25, 783.99, 880.0];
     const freq = freqs[tier] ?? 659.25;
@@ -373,7 +433,6 @@ class MechanicalAudioEngine {
 
     const now = ctx.currentTime;
     const baseGain = Math.min(1, Math.max(0, volume)) * 0.16;
-    // Warm C-major ninth arpeggio for PB; serene fifth for standard finish
     const notes = isPersonalBest
       ? [523.25, 659.25, 783.99, 1174.66]
       : [523.25, 783.99];
@@ -392,18 +451,6 @@ class MechanicalAudioEngine {
       g.connect(ctx.destination);
       osc.start(start);
       osc.stop(start + 0.48);
-    });
-  }
-
-  public syncAmbientState(
-    volumes: Record<AmbientTrack, number>,
-    masterMuted: boolean
-  ): void {
-    this.setMasterMuted(masterMuted);
-    (Object.keys(volumes) as AmbientTrack[]).forEach((track) => {
-      if (volumes[track] > 0.01 || this.ambientNodes[track]) {
-        this.updateAmbientTrack(track, volumes[track]);
-      }
     });
   }
 }

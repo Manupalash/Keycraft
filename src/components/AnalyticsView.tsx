@@ -21,6 +21,7 @@ interface AnalyticsViewProps {
 }
 
 type HeatmapMetric = 'errorRate' | 'latency';
+type ClearHistoryState = 'idle' | 'confirming';
 
 export function AnalyticsView({
   history,
@@ -33,7 +34,7 @@ export function AnalyticsView({
 }: AnalyticsViewProps) {
   const [heatmapMetric, setHeatmapMetric] = useState<HeatmapMetric>('errorRate');
   const [selectedKey, setSelectedKey] = useState<string>('e');
-  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearState, setClearState] = useState<ClearHistoryState>('idle');
 
   const theme = getThemeById(themeId);
   const topWeakKeys = useMemo(() => getTopWeakKeys(keyStats, 4), [keyStats]);
@@ -168,7 +169,7 @@ export function AnalyticsView({
             </button>
           )}
 
-          {confirmClear ? (
+          {clearState === 'confirming' ? (
             <div className="flex items-center gap-2">
               <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
                 Clear all local history?
@@ -177,7 +178,7 @@ export function AnalyticsView({
                 type="button"
                 onClick={() => {
                   onClearHistory();
-                  setConfirmClear(false);
+                  setClearState('idle');
                 }}
                 className="cursor-pointer rounded-md px-3 py-1.5 text-xs font-semibold whitespace-nowrap"
                 style={{
@@ -189,7 +190,7 @@ export function AnalyticsView({
               </button>
               <button
                 type="button"
-                onClick={() => setConfirmClear(false)}
+                onClick={() => setClearState('idle')}
                 className="cursor-pointer rounded-md px-3 py-1.5 text-xs font-medium whitespace-nowrap"
                 style={{
                   backgroundColor: 'var(--bg-surface-alt)',
@@ -202,7 +203,7 @@ export function AnalyticsView({
           ) : (
             <button
               type="button"
-              onClick={() => setConfirmClear(true)}
+              onClick={() => setClearState('confirming')}
               className="flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium whitespace-nowrap transition-colors"
               style={{
                 backgroundColor: 'var(--bg-surface)',

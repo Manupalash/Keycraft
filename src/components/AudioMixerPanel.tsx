@@ -39,19 +39,19 @@ export function AudioMixerPanel({
         onClose();
       }
     };
-    const handleClickOutside = (e: MouseEvent) => {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('[data-audio-trigger="true"]')) return;
+      if (panelRef.current && !panelRef.current.contains(target)) {
         onClose();
       }
     };
     window.addEventListener('keydown', handleEsc);
-    const timer = setTimeout(() => {
-      window.addEventListener('mousedown', handleClickOutside);
-    }, 0);
+    window.addEventListener('pointerdown', handlePointerDown);
     return () => {
       window.removeEventListener('keydown', handleEsc);
-      clearTimeout(timer);
-      window.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('pointerdown', handlePointerDown);
     };
   }, [isOpen, onClose]);
 
